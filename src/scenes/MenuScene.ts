@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { getTankSkin } from "../data/tankSkins";
 import { GAME_HEIGHT, GAME_WIDTH, Palette, SceneKeys } from "../game/constants";
+import { tryEnterLandscapeMode } from "../platform/OrientationLock";
 import { playablesBridge } from "../platform/PlayablesBridge";
 import { saveSystem } from "../systems/SaveSystem";
 import { sfxSystem } from "../systems/SfxSystem";
@@ -178,6 +179,8 @@ export class MenuScene extends Phaser.Scene {
   }
 
   private handlePlayClick(): void {
+    void tryEnterLandscapeMode();
+
     const progress = saveSystem.loadProgress();
 
     if (progress.playerName.trim()) {
