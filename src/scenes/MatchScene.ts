@@ -10,6 +10,12 @@ import { Player, type MovementInput } from "../entities/Player";
 import { RechargePickup, type RechargePickupConfig, type RechargePickupType } from "../entities/RechargePickup";
 import { WeaponPickup } from "../entities/WeaponPickup";
 import { ARENA_BOUNDS, GAME_HEIGHT, GAME_WIDTH, Palette, SceneKeys } from "../game/constants";
+import {
+  MultiplayerClient,
+  type MultiplayerLobbyPlayer,
+  type MultiplayerMatchEnded,
+  type MultiplayerSnapshot
+} from "../multiplayer/MultiplayerClient";
 import { playablesBridge } from "../platform/PlayablesBridge";
 import { saveSystem } from "../systems/SaveSystem";
 import { sfxSystem } from "../systems/SfxSystem";
@@ -79,6 +85,9 @@ type MatchSceneData = {
   playerCount?: number;
   playerName?: string;
   rivalNames?: string[];
+  multiplayerClient?: MultiplayerClient;
+  multiplayerPlayers?: MultiplayerLobbyPlayer[];
+  multiplayerCountdownMs?: number;
 };
 
 type SpawnPoint = {
@@ -213,6 +222,14 @@ export class MatchScene extends Phaser.Scene {
   private arenaPlayerCount = 5;
   private playerDisplayName = "Player";
   private rivalDisplayNames: string[] = [];
+  private multiplayerClient?: MultiplayerClient;
+  private multiplayerPlayers: MultiplayerLobbyPlayer[] = [];
+  private multiplayerCountdownMs = MATCH_COUNTDOWN_MS;
+  private readonly multiplayerRemoteTargets = new Map<string, EnemyTarget>();
+  private readonly multiplayerBulletSprites = new Map<string, Phaser.GameObjects.Arc>();
+  private readonly multiplayerUnsubscribes: Array<() => void> = [];
+  private lastMultiplayerInputAt = 0;
+  private multiplayerMatchEnded = false;
   private readonly handleDocumentVisibilityChange = (): void => {
     if (document.hidden) {
       this.pauseMatch("system");
@@ -238,28 +255,38 @@ export class MatchScene extends Phaser.Scene {
     this.arenaPlayerCount = Phaser.Math.Clamp(Math.round(data?.playerCount ?? 5), 2, 8);
     this.playerDisplayName = this.sanitizeDisplayName(data?.playerName ?? "Player");
     this.rivalDisplayNames = (data?.rivalNames ?? []).map((name) => this.sanitizeDisplayName(name));
+    this.multiplayerClient = data?.multiplayerClient;
+    this.multiplayerPlayers = data?.multiplayerPlayers ?? [];
+    this.multiplayerCountdownMs = Phaser.Math.Clamp(Math.round(data?.multiplayerCountdownMs ?? MATCH_COUNTDOWN_MS), 400, MATCH_COUNTDOWN_MS);
   }
 
   create(): void {
     this.resetMatchState();
     sfxSystem.registerScene(this);
     this.registerLifecycleHandlers();
-    this.countdownEndsAt = this.getNow() + MATCH_COUNTDOWN_MS;
+    this.countdownEndsAt = this.getNow() + (this.isMultiplayerMatch() ? this.multiplayerCountdownMs : MATCH_COUNTDOWN_MS);
     this.matchStartAt = this.countdownEndsAt;
     this.cameras.main.setBackgroundColor(0x101827);
     this.input.setDefaultCursor("crosshair");
     this.drawArena();
     this.createSafeZoneOverlay();
-    this.matchSpawnPoints.push(...this.createMatchSpawnPoints(this.arenaPlayerCount));
+    this.matchSpawnPoints.push(...(this.isMultiplayerMatch() ? this.createMultiplayerSpawnPoints() : this.createMatchSpawnPoints(this.arenaPlayerCount)));
     this.createPlayer();
-    this.createEnemyTargets();
-    this.createWeaponPickups();
-    this.createRechargePickups();
+    if (this.isMultiplayerMatch()) {
+      this.createMultiplayerEnemyTargets();
+      this.registerMultiplayerHandlers();
+    } else {
+      this.createEnemyTargets();
+      this.createWeaponPickups();
+      this.createRechargePickups();
+    }
     this.createInput();
     this.createAimReticle();
     this.drawHud();
     this.createTouchControls();
-    this.createTutorialGuide();
+    if (!this.isMultiplayerMatch()) {
+      this.createTutorialGuide();
+    }
     this.updateSafeZone(0);
     this.createCountdownOverlay();
   }
@@ -293,6 +320,23 @@ export class MatchScene extends Phaser.Scene {
     this.updateTutorialGuide();
 
     this.updateCountdownOverlay();
+
+    if (this.isMultiplayerMatch()) {
+      this.sendMultiplayerInput(now);
+
+      if (!this.matchActive) {
+        return;
+      }
+
+      this.updateSafeZone(delta);
+      this.syncMultiplayerSnapshot(delta);
+
+      if (this.playerAlive) {
+        this.handleWeaponControls();
+      }
+
+      return;
+    }
 
     if (!this.matchActive) {
       if (this.playerAlive) {
@@ -434,6 +478,43 @@ export class MatchScene extends Phaser.Scene {
 
   private sanitizeDisplayName(name: string): string {
     return name.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, " ").trim().slice(0, 14) || "Player";
+  }
+
+  private isMultiplayerMatch(): boolean {
+    return Boolean(this.multiplayerClient);
+  }
+
+  private createMultiplayerSpawnPoints(): SpawnPoint[] {
+    const localId = this.multiplayerClient?.playerId;
+    const localPlayer = this.multiplayerPlayers.find((player) => player.id === localId);
+    const remotePlayers = this.multiplayerPlayers.filter((player) => player.id !== localId);
+    const points = [
+      localPlayer ? { x: localPlayer.x, y: localPlayer.y } : this.findMatchSpawnPoint([]),
+      ...remotePlayers.map((player) => ({ x: player.x, y: player.y }))
+    ];
+
+    return points.length > 0 ? points : this.createMatchSpawnPoints(this.arenaPlayerCount);
+  }
+
+  private createMultiplayerEnemyTargets(): void {
+    const localId = this.multiplayerClient?.playerId;
+
+    this.multiplayerPlayers
+      .filter((player) => player.id !== localId)
+      .forEach((player) => {
+        const enemy = new EnemyTarget(this, {
+          x: player.x,
+          y: player.y,
+          name: player.name,
+          color: player.color,
+          maxHealth: 100,
+          maxShield: 50,
+          speed: 120,
+          preferredRange: 240
+        });
+
+        this.multiplayerRemoteTargets.set(player.id, enemy);
+      });
   }
 
   private createPlayer(): void {
@@ -604,6 +685,22 @@ export class MatchScene extends Phaser.Scene {
     }
 
     this.touchControls = new TouchControls(this);
+  }
+
+  private registerMultiplayerHandlers(): void {
+    if (!this.multiplayerClient) {
+      return;
+    }
+
+    this.multiplayerUnsubscribes.push(
+      this.multiplayerClient.on("matchEnded", (result) => this.finalizeMultiplayerMatch(result)),
+      this.multiplayerClient.on("close", () => {
+        if (!this.matchFinalized) {
+          this.showStatus("Multiplayer connection ended.", Palette.warning, 1200);
+          this.time.delayedCall(900, () => this.finalizeMatch(false, "eliminated"));
+        }
+      })
+    );
   }
 
   private shouldShowTouchControls(): boolean {
@@ -1178,6 +1275,15 @@ export class MatchScene extends Phaser.Scene {
     window.removeEventListener("blur", this.handleWindowBlur);
     this.input.keyboard?.off("keydown-ESC", this.handlePauseKey, this);
     this.input.keyboard?.off("keydown-P", this.handlePauseKey, this);
+    this.multiplayerUnsubscribes.splice(0).forEach((unsubscribe) => unsubscribe());
+    this.multiplayerBulletSprites.forEach((sprite) => sprite.destroy());
+    this.multiplayerBulletSprites.clear();
+    this.multiplayerRemoteTargets.clear();
+
+    if (this.multiplayerClient && !this.multiplayerMatchEnded) {
+      this.multiplayerClient.close();
+    }
+
     this.pauseOverlay?.destroy(true);
     this.pauseOverlay = undefined;
     this.matchPaused = false;
@@ -1196,14 +1302,35 @@ export class MatchScene extends Phaser.Scene {
     };
   }
 
-  private handleShooting(time: number): void {
+  private isFireInputDown(): boolean {
     const pointer = this.input.activePointer;
-    const weapon = this.activeWeapon;
     const pointerWantsToShoot = pointer.isDown && !this.touchControls?.isControlPointer(pointer);
     const keyboardWantsToShoot = Boolean(this.actionKeys?.fire.isDown);
     const touchWantsToShoot = Boolean(this.touchControls?.fireDown);
 
-    if (!this.matchActive || (!pointerWantsToShoot && !keyboardWantsToShoot && !touchWantsToShoot) || !this.player || !this.playerAlive) {
+    return pointerWantsToShoot || keyboardWantsToShoot || touchWantsToShoot;
+  }
+
+  private sendMultiplayerInput(time: number): void {
+    if (!this.multiplayerClient || !this.player || time - this.lastMultiplayerInputAt < 50) {
+      return;
+    }
+
+    this.lastMultiplayerInputAt = time;
+    const movementInput = this.playerAlive ? this.getMovementInput() : { x: 0, y: 0 };
+    this.multiplayerClient.sendInput({
+      moveX: movementInput.x,
+      moveY: movementInput.y,
+      aimAngle: this.player.getAimAngle(),
+      fire: this.matchActive && this.playerAlive && this.isFireInputDown()
+    });
+  }
+
+  private handleShooting(time: number): void {
+    const weapon = this.activeWeapon;
+    const wantsToShoot = this.isFireInputDown();
+
+    if (!this.matchActive || !wantsToShoot || !this.player || !this.playerAlive) {
       return;
     }
 
@@ -1369,6 +1496,13 @@ export class MatchScene extends Phaser.Scene {
   }
 
   private updateWeaponHud(): void {
+    if (this.isMultiplayerMatch()) {
+      this.weaponText?.setText(
+        `Weapon: Pistol   Ammo: Online   Armor: ${this.armorShards}   Coins: ${this.coinShards}   HP ${Math.round(this.playerHealth)}/${this.playerMaxHealth}   SH ${Math.round(this.playerShield)}/${this.playerMaxShield}`
+      );
+      return;
+    }
+
     this.weaponText?.setText(
       `Weapon: ${this.activeWeapon.name}   Ammo: ${this.activeAmmo}/${this.activeWeapon.ammoCapacity}   Armor: ${this.armorShards}   Coins: ${this.coinShards}   HP ${Math.round(this.playerHealth)}/${this.playerMaxHealth}   SH ${Math.round(this.playerShield)}/${this.playerMaxShield}`
     );
@@ -1401,6 +1535,99 @@ export class MatchScene extends Phaser.Scene {
     this.healthBarFill?.setScale(healthRatio, 1);
     this.shieldBarFill?.setScale(shieldRatio, 1);
     this.player?.setShieldRatio(shieldRatio);
+  }
+
+  private syncMultiplayerSnapshot(delta: number): void {
+    const snapshot = this.multiplayerClient?.lastSnapshot;
+    const localId = this.multiplayerClient?.playerId;
+
+    if (!snapshot || !localId) {
+      return;
+    }
+
+    const localPlayer = snapshot.players.find((player) => player.id === localId);
+
+    if (localPlayer) {
+      this.playerAlive = localPlayer.alive;
+      this.playerHealth = localPlayer.health;
+      this.playerMaxHealth = localPlayer.maxHealth;
+      this.playerShield = localPlayer.shield;
+      this.playerMaxShield = localPlayer.maxShield;
+      this.score = localPlayer.score;
+      this.kills = localPlayer.kills;
+      this.safeZoneRadius = snapshot.safeZoneRadius;
+
+      if (this.player && localPlayer.alive) {
+        this.player.syncNetworkState({
+          x: localPlayer.x,
+          y: localPlayer.y,
+          aimAngle: localPlayer.aimAngle,
+          moveX: localPlayer.moveX,
+          moveY: localPlayer.moveY,
+          deltaMs: delta,
+          bounds: ARENA_BOUNDS
+        });
+      }
+    }
+
+    snapshot.players
+      .filter((remotePlayer) => remotePlayer.id !== localId)
+      .forEach((remotePlayer) => {
+        let target = this.multiplayerRemoteTargets.get(remotePlayer.id);
+
+        if (!target) {
+          target = new EnemyTarget(this, {
+            x: remotePlayer.x,
+            y: remotePlayer.y,
+            name: remotePlayer.name,
+            color: remotePlayer.color,
+            maxHealth: remotePlayer.maxHealth,
+            maxShield: remotePlayer.maxShield
+          });
+          this.multiplayerRemoteTargets.set(remotePlayer.id, target);
+        }
+
+        target.syncNetworkState({
+          x: remotePlayer.x,
+          y: remotePlayer.y,
+          aimAngle: remotePlayer.aimAngle,
+          moveX: remotePlayer.moveX,
+          moveY: remotePlayer.moveY,
+          healthRatio: remotePlayer.maxHealth > 0 ? remotePlayer.health / remotePlayer.maxHealth : 0,
+          shieldRatio: remotePlayer.maxShield > 0 ? remotePlayer.shield / remotePlayer.maxShield : 0,
+          alive: remotePlayer.alive,
+          deltaMs: delta
+        });
+      });
+
+    this.syncMultiplayerBullets(snapshot);
+    this.updatePlayerHud();
+    this.updateCombatHud();
+  }
+
+  private syncMultiplayerBullets(snapshot: MultiplayerSnapshot): void {
+    const activeBulletIds = new Set(snapshot.bullets.map((bullet) => bullet.id));
+
+    this.multiplayerBulletSprites.forEach((sprite, bulletId) => {
+      if (!activeBulletIds.has(bulletId)) {
+        sprite.destroy();
+        this.multiplayerBulletSprites.delete(bulletId);
+      }
+    });
+
+    snapshot.bullets.forEach((bullet) => {
+      let sprite = this.multiplayerBulletSprites.get(bullet.id);
+
+      if (!sprite) {
+        sprite = this.add.circle(bullet.x, bullet.y, bullet.radius, bullet.color, 1);
+        sprite.setStrokeStyle(1, 0xffffff, 0.35);
+        sprite.setDepth(8);
+        this.multiplayerBulletSprites.set(bullet.id, sprite);
+        return;
+      }
+
+      sprite.setPosition(bullet.x, bullet.y);
+    });
   }
 
   private handlePlayerBulletHit(bullet: Bullet): boolean {
@@ -2106,6 +2333,69 @@ export class MatchScene extends Phaser.Scene {
     };
   }
 
+  private finalizeMultiplayerMatch(serverResult: MultiplayerMatchEnded): void {
+    if (this.matchFinalized) {
+      return;
+    }
+
+    const localId = this.multiplayerClient?.playerId;
+    const localStanding = serverResult.standings.find((standing) => standing.id === localId);
+    const won = Boolean(localStanding && !localStanding.eliminated && localStanding.position === 1);
+    const finalScore = localStanding?.score ?? 0;
+    const coinsEarned = localStanding?.coinsEarned ?? 0;
+    const progress = saveSystem.loadProgress();
+    const updatedProgress = {
+      ...progress,
+      coins: progress.coins + coinsEarned,
+      totalMatches: progress.totalMatches + 1,
+      totalWins: progress.totalWins + (won ? 1 : 0),
+      bestScore: Math.max(progress.bestScore, finalScore)
+    };
+    const standings: MatchStanding[] = serverResult.standings.map((standing) => ({
+      position: standing.position,
+      name: standing.name,
+      score: standing.score,
+      coinsEarned: standing.coinsEarned,
+      eliminated: standing.eliminated,
+      isPlayer: standing.id === localId
+    }));
+
+    this.matchFinalized = true;
+    this.multiplayerMatchEnded = true;
+    this.playerAlive = false;
+    this.input.setDefaultCursor("default");
+    this.pickupPromptText?.setText("");
+    saveSystem.saveProgress(updatedProgress);
+
+    const result: MatchResultData = {
+      won,
+      reason: won ? "victory" : "eliminated",
+      placement: localStanding?.position ?? standings.length,
+      playerCount: standings.length,
+      score: finalScore,
+      baseScore: finalScore,
+      survivalBonus: 0,
+      winBonus: won ? LAST_SURVIVOR_SCORE_BONUS : 0,
+      coinsEarned,
+      totalCoins: updatedProgress.coins,
+      kills: this.kills,
+      damageDealt: Math.round(this.damageDealt),
+      survivalSeconds: serverResult.survivalSeconds,
+      armorShards: 0,
+      coinShards: 0,
+      bestScore: updatedProgress.bestScore,
+      totalMatches: updatedProgress.totalMatches,
+      totalWins: updatedProgress.totalWins,
+      standings
+    };
+
+    this.showStatus(won ? "Victory. Calculating rewards..." : "Eliminated. Calculating rewards...", won ? Palette.accent : Palette.danger, 1200);
+    this.time.delayedCall(1100, () => {
+      this.multiplayerClient?.close();
+      this.scene.start(SceneKeys.Results, result);
+    });
+  }
+
   private finalizeMatch(won: boolean, reason: MatchResultData["reason"]): void {
     if (this.matchFinalized) {
       return;
@@ -2722,6 +3012,9 @@ export class MatchScene extends Phaser.Scene {
     this.botMovementStates.clear();
     this.eliminatedEnemies.length = 0;
     this.matchSpawnPoints.length = 0;
+    this.multiplayerRemoteTargets.clear();
+    this.multiplayerBulletSprites.forEach((sprite) => sprite.destroy());
+    this.multiplayerBulletSprites.clear();
     this.clearCountdownTimers();
     this.player = undefined;
     this.cursorKeys = undefined;
@@ -2787,6 +3080,8 @@ export class MatchScene extends Phaser.Scene {
     this.safeZoneRadius = SAFE_ZONE_PHASES[0].fromRadius;
     this.lastZoneWarningAt = Number.NEGATIVE_INFINITY;
     this.lastZoneDamageTickAt = Number.NEGATIVE_INFINITY;
+    this.lastMultiplayerInputAt = 0;
+    this.multiplayerMatchEnded = false;
     this.initializePlayerStats();
   }
 

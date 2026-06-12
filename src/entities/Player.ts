@@ -126,6 +126,35 @@ export class Player {
     this.turret.rotation = this.aimAngle;
   }
 
+  syncNetworkState(config: { x: number; y: number; aimAngle: number; moveX: number; moveY: number; deltaMs: number; bounds: ArenaBounds }): void {
+    this.container.x = Phaser.Math.Linear(this.container.x, config.x, 0.45);
+    this.container.y = Phaser.Math.Linear(this.container.y, config.y, 0.45);
+    this.container.x = Phaser.Math.Clamp(
+      this.container.x,
+      config.bounds.x + this.radius,
+      config.bounds.x + config.bounds.width - this.radius
+    );
+    this.container.y = Phaser.Math.Clamp(
+      this.container.y,
+      config.bounds.y + this.radius,
+      config.bounds.y + config.bounds.height - this.radius
+    );
+    this.movementVector.set(config.moveX, config.moveY);
+
+    if (this.movementVector.lengthSq() > 0) {
+      this.movementVector.normalize();
+      const targetBodyAngle = Math.atan2(this.movementVector.y, this.movementVector.x);
+      this.bodyAngle = this.rotateToward(this.bodyAngle, targetBodyAngle, config.deltaMs * 0.014);
+      this.chassis.rotation = this.bodyAngle;
+      this.animateTreads(config.deltaMs);
+    } else {
+      this.treadMarks.forEach((mark) => mark.setAlpha(0.42));
+    }
+
+    this.aimAngle = config.aimAngle;
+    this.turret.rotation = this.aimAngle;
+  }
+
   setAimTarget(x: number, y: number): void {
     this.aimTarget.set(x, y);
   }

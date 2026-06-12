@@ -1,6 +1,7 @@
 import Phaser from "phaser";
 import { getTankSkin } from "../data/tankSkins";
 import { GAME_HEIGHT, GAME_WIDTH, Palette, SceneKeys } from "../game/constants";
+import { MultiplayerClient, type MultiplayerLobbyState } from "../multiplayer/MultiplayerClient";
 import { saveSystem } from "../systems/SaveSystem";
 import { sfxSystem } from "../systems/SfxSystem";
 import { createTextButton } from "../ui/Button";
@@ -12,8 +13,11 @@ const BOT_NAMES = ["Maya", "Arjun", "Zara", "Leo", "Nora", "Isha", "Kabir"];
 
 type LobbyPlayer = {
   color: number;
+  id?: string;
   joinedAt: number;
   name: string;
+  x?: number;
+  y?: number;
 };
 
 export class LobbyScene extends Phaser.Scene {
@@ -30,6 +34,12 @@ export class LobbyScene extends Phaser.Scene {
   private timerText?: Phaser.GameObjects.Text;
   private countText?: Phaser.GameObjects.Text;
   private progressBar?: Phaser.GameObjects.Rectangle;
+  private multiplayerClient?: MultiplayerClient;
+  private multiplayerRequested = false;
+  private multiplayerConnected = false;
+  private multiplayerFallbackStarted = false;
+  private handingOffToMatch = false;
+  private readonly multiplayerUnsubscribes: Array<() => void> = [];
 
   constructor() {
     super(SceneKeys.Lobby);
@@ -43,6 +53,12 @@ export class LobbyScene extends Phaser.Scene {
     this.nextJoinIndex = 0;
     this.started = false;
     this.launching = false;
+    this.multiplayerRequested = false;
+    this.multiplayerConnected = false;
+    this.multiplayerFallbackStarted = false;
+    this.handingOffToMatch = false;
+    this.multiplayerUnsubscribes.splice(0).forEach((unsubscribe) => unsubscribe());
+    this.multiplayerClient = undefined;
     this.launchAt = 0;
     this.launchTimer?.remove(false);
     this.launchTimer = undefined;
@@ -53,13 +69,26 @@ export class LobbyScene extends Phaser.Scene {
     this.drawBackground();
     this.drawHeader();
     this.drawLobbyPanel();
-    this.createJoinSchedule();
     this.addPlayer(this.getSavedPlayerName(), this.getSavedPlayerSkinColor());
+    this.multiplayerRequested = Boolean(MultiplayerClient.getRequestedUrl());
+
+    if (this.multiplayerRequested) {
+      void this.startMultiplayerLobby();
+    } else {
+      this.createJoinSchedule();
+    }
+
     this.updateLobbyText(this.startAt);
     sfxSystem.startLobbyMusic(this);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.launchTimer?.remove(false);
       this.launchTimer = undefined;
+      this.multiplayerUnsubscribes.splice(0).forEach((unsubscribe) => unsubscribe());
+
+      if (this.multiplayerClient && !this.handingOffToMatch) {
+        this.multiplayerClient.close();
+      }
+
       sfxSystem.stopLobbyMusic();
     });
   }
@@ -70,6 +99,15 @@ export class LobbyScene extends Phaser.Scene {
     }
 
     const now = Date.now();
+
+    if (this.multiplayerConnected) {
+      this.updateMultiplayerLobbyText();
+      return;
+    }
+
+    if (this.multiplayerRequested && !this.multiplayerFallbackStarted) {
+      return;
+    }
 
     if (this.launching) {
       this.updateLobbyText(now);
@@ -183,7 +221,7 @@ export class LobbyScene extends Phaser.Scene {
       y: 468,
       width: 180,
       height: 42,
-      onClick: () => this.scene.start(SceneKeys.Menu)
+      onClick: () => this.cancelLobby()
     });
   }
 
@@ -194,6 +232,125 @@ export class LobbyScene extends Phaser.Scene {
       this.joinSchedule.push(nextJoinAt);
       nextJoinAt += Phaser.Math.Between(2500, 4300);
     }
+  }
+
+  private async startMultiplayerLobby(): Promise<void> {
+    const url = MultiplayerClient.getRequestedUrl();
+
+    if (!url) {
+      this.startBotFallbackLobby();
+      return;
+    }
+
+    const client = new MultiplayerClient(url);
+    this.multiplayerClient = client;
+    this.multiplayerUnsubscribes.push(
+      client.on("lobby", (state) => this.applyMultiplayerLobbyState(state)),
+      client.on("close", () => {
+        if (!this.started && !this.handingOffToMatch) {
+          this.startBotFallbackLobby();
+        }
+      }),
+      client.on("error", () => {
+        if (!this.started && !this.handingOffToMatch) {
+          this.startBotFallbackLobby();
+        }
+      })
+    );
+
+    const connected = await client.connect({
+      name: this.getSavedPlayerName(),
+      color: this.getSavedPlayerSkinColor()
+    });
+
+    if (!connected && !this.started && !this.handingOffToMatch) {
+      this.startBotFallbackLobby();
+      return;
+    }
+
+    this.multiplayerConnected = connected;
+
+    if (client.lastLobbyState) {
+      this.applyMultiplayerLobbyState(client.lastLobbyState);
+    }
+  }
+
+  private startBotFallbackLobby(): void {
+    if (this.multiplayerFallbackStarted || this.started) {
+      return;
+    }
+
+    this.multiplayerUnsubscribes.splice(0).forEach((unsubscribe) => unsubscribe());
+    this.multiplayerClient?.close();
+    this.multiplayerClient = undefined;
+    this.multiplayerRequested = false;
+    this.multiplayerConnected = false;
+    this.multiplayerFallbackStarted = true;
+    this.startAt = Date.now();
+    this.createJoinSchedule();
+    this.updateLobbyText(this.startAt);
+  }
+
+  private applyMultiplayerLobbyState(state: MultiplayerLobbyState): void {
+    this.multiplayerConnected = true;
+    this.players.length = 0;
+
+    state.players.forEach((player) => {
+      this.players.push({
+        id: player.id,
+        name: player.name,
+        color: player.color,
+        joinedAt: Date.now(),
+        x: player.x,
+        y: player.y
+      });
+    });
+
+    for (let index = 0; index < MAX_LOBBY_PLAYERS; index += 1) {
+      this.drawSlot(index);
+    }
+
+    this.updateMultiplayerLobbyText(state);
+
+    if (state.phase === "countdown") {
+      this.startMultiplayerMatch(state);
+    }
+  }
+
+  private updateMultiplayerLobbyText(state = this.multiplayerClient?.lastLobbyState): void {
+    if (!state) {
+      this.countText?.setText(`${this.players.length}/${MAX_LOBBY_PLAYERS} players`);
+      this.timerText?.setText("Connecting");
+      this.progressBar?.setScale(0.15, 1);
+      return;
+    }
+
+    const remainingSeconds = Math.max(0, Math.ceil(state.startsInMs / 1000));
+    const progress = state.phase === "countdown" ? 1 : 1 - Phaser.Math.Clamp(state.startsInMs / LOBBY_WAIT_MS, 0, 1);
+
+    this.countText?.setText(`${state.players.length}/${state.maxPlayers} players`);
+    this.timerText?.setText(state.phase === "countdown" ? `Battle in ${remainingSeconds}s` : `Starts in ${remainingSeconds}s`);
+    this.progressBar?.setScale(progress, 1);
+  }
+
+  private startMultiplayerMatch(state: MultiplayerLobbyState): void {
+    if (this.started || !this.multiplayerClient) {
+      return;
+    }
+
+    this.started = true;
+    this.launching = true;
+    this.handingOffToMatch = true;
+    sfxSystem.stopLobbyMusic();
+    sfxSystem.play("start");
+    this.scene.start(SceneKeys.Match, {
+      playerCount: state.players.length,
+      playerName: state.players.find((player) => player.id === this.multiplayerClient?.playerId)?.name ?? this.getSavedPlayerName(),
+      rivalNames: state.players.filter((player) => player.id !== this.multiplayerClient?.playerId).map((player) => player.name),
+      multiplayerClient: this.multiplayerClient,
+      multiplayerPlayers: state.players,
+      multiplayerCountdownMs: state.countdownMs
+    });
   }
 
   private addPlayer(name: string, color: number): void {
@@ -302,6 +459,11 @@ export class LobbyScene extends Phaser.Scene {
       playerName: this.players[0]?.name ?? this.getSavedPlayerName(),
       rivalNames: this.players.slice(1).map((player) => player.name)
     });
+  }
+
+  private cancelLobby(): void {
+    this.multiplayerClient?.close();
+    this.scene.start(SceneKeys.Menu);
   }
 
   private getPlayerColor(index: number): number {

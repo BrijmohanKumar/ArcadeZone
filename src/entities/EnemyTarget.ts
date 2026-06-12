@@ -153,6 +153,46 @@ export class EnemyTarget {
     this.applyMovement(deltaMs, bounds, speedMultiplier);
   }
 
+  syncNetworkState(config: {
+    x: number;
+    y: number;
+    aimAngle: number;
+    moveX: number;
+    moveY: number;
+    healthRatio: number;
+    shieldRatio: number;
+    alive: boolean;
+    deltaMs: number;
+  }): void {
+    if (!config.alive) {
+      if (this.alive) {
+        this.alive = false;
+        this.playDeathFeedback();
+      }
+
+      return;
+    }
+
+    this.container.x = Phaser.Math.Linear(this.container.x, config.x, 0.45);
+    this.container.y = Phaser.Math.Linear(this.container.y, config.y, 0.45);
+    this.aimAngle = config.aimAngle;
+    this.turret.rotation = this.aimAngle;
+    this.health = this.maxHealth * Phaser.Math.Clamp(config.healthRatio, 0, 1);
+    this.shield = this.maxShield * Phaser.Math.Clamp(config.shieldRatio, 0, 1);
+    this.updateBars();
+    this.movementVector.set(config.moveX, config.moveY);
+
+    if (this.movementVector.lengthSq() > 0) {
+      this.movementVector.normalize();
+      const targetBodyAngle = Math.atan2(this.movementVector.y, this.movementVector.x);
+      this.bodyAngle = this.rotateToward(this.bodyAngle, targetBodyAngle, config.deltaMs * 0.012);
+      this.chassis.rotation = this.bodyAngle;
+      this.animateTreads(config.deltaMs);
+    } else {
+      this.treadMarks.forEach((mark) => mark.setAlpha(0.38));
+    }
+  }
+
   restoreShield(amount: number): number {
     if (!this.alive || amount <= 0) {
       return 0;

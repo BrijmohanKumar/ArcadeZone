@@ -4,7 +4,7 @@ A step-by-step YouTube Playables-style top-down arena game built with TypeScript
 
 ## Current Milestone
 
-Step 43 improves desktop fire controls:
+Current build includes optional WebSocket multiplayer test mode:
 
 - Vite + Phaser + TypeScript scaffold
 - Boot, menu, how-to-play, upgrades, match placeholder, and results placeholder scenes
@@ -157,9 +157,9 @@ Step 43 improves desktop fire controls:
 - Rival bots now spread around unique safe-zone positions instead of all pathing to the exact center
 - Rival bots also separate from nearby rivals when they cluster during late-zone combat
 - Play and Play Again now enter a Battle Lobby before starting the arena
-- The lobby waits for up to 6 total players or a 30-second timer, whichever completes first
-- The current lobby uses simulated entrants as a placeholder for future real multiplayer matchmaking
-- Match startup now receives the lobby player count and can spawn up to 5 rivals for a 6-player arena
+- The normal lobby waits for up to 8 total tanks or a 30-second timer, whichever completes first
+- Bot entrants remain the default fallback for the YouTube-safe/static build
+- Match startup now receives the lobby player count and can spawn up to 7 rivals for an 8-player arena
 - Lobby slots now show tank-style player cards instead of plain text entries
 - The lobby now shows clearer full/late-start status messages while players join
 - The arena starts with a clear `3`, `2`, `1`, `Battle Begin` countdown before live combat begins
@@ -188,6 +188,10 @@ Step 43 improves desktop fire controls:
 - Match touch controls now appear automatically only on coarse-pointer/mobile devices so desktop play keeps the arena clear
 - Desktop testing can force touch controls with `?touch=1` when needed
 - How To Play now documents Space or left-click firing with mouse aiming
+- Optional multiplayer test mode starts when the URL includes `?mp=1` or `?mp=ws://host:port`
+- Multiplayer mode connects to a small WebSocket server for shared lobby, live movement, live firing, health, eliminations, and standings
+- If multiplayer is requested but the server is unavailable, the game falls back to the normal bot lobby
+- Multiplayer waits for at least 2 real socket players before launching so one player does not get an instant one-player victory
 
 YouTube Playables packaging comes in the next milestones.
 
@@ -204,6 +208,49 @@ npm run dev
 ```
 
 Open the local URL printed by Vite.
+
+For phone testing on the same Wi-Fi, run the LAN dev server instead:
+
+```bash
+npm run dev:lan
+```
+
+Then open `http://YOUR_PC_LAN_IP:5173/` on the phone.
+
+## Optional Multiplayer Test
+
+Terminal 1:
+
+```bash
+npm run dev
+```
+
+Terminal 2:
+
+```bash
+npm run multiplayer
+```
+
+Then open:
+
+```text
+http://127.0.0.1:5173/?mp=1
+```
+
+For phone testing on the same Wi-Fi, use:
+
+```bash
+npm run dev:lan
+npm run multiplayer
+```
+
+Then open this on each device:
+
+```text
+http://YOUR_PC_LAN_IP:5173/?mp=ws://YOUR_PC_LAN_IP:8787
+```
+
+GitHub Pages is static hosting, so it cannot run the multiplayer server. For internet sharing, the frontend must point to a deployed secure WebSocket backend using `?mp=wss://YOUR_SERVER`.
 
 ## Build
 
