@@ -9,38 +9,21 @@ import { createTextButton } from "../ui/Button";
 
 export class MenuScene extends Phaser.Scene {
   private namePrompt?: Phaser.GameObjects.Container;
-  private nameInputText?: Phaser.GameObjects.Text;
+  private nameInputElement?: HTMLInputElement;
   private pendingPlayerName = "";
-  private readonly handleNameKeyDown = (event: KeyboardEvent): void => {
-    if (!this.namePrompt) {
-      return;
-    }
-
+  private readonly handleNameInput = (): void => this.updatePendingNameFromInput();
+  private readonly handleNameInputKeyDown = (event: KeyboardEvent): void => {
     if (event.key === "Enter") {
       this.confirmPlayerName();
       event.preventDefault();
-      return;
     }
 
     if (event.key === "Escape") {
       this.closeNamePrompt();
       event.preventDefault();
-      return;
-    }
-
-    if (event.key === "Backspace") {
-      this.pendingPlayerName = this.pendingPlayerName.slice(0, -1);
-      this.updateNameInputText();
-      event.preventDefault();
-      return;
-    }
-
-    if (event.key.length === 1 && /^[a-zA-Z0-9 ]$/.test(event.key) && this.pendingPlayerName.length < 14) {
-      this.pendingPlayerName = `${this.pendingPlayerName}${event.key}`.replace(/\s+/g, " ");
-      this.updateNameInputText();
-      event.preventDefault();
     }
   };
+  private readonly handleViewportChanged = (): void => this.positionNameInputElement();
 
   constructor() {
     super(SceneKeys.Menu);
@@ -57,7 +40,7 @@ export class MenuScene extends Phaser.Scene {
 
     playablesBridge.gameReady();
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.input.keyboard?.off("keydown", this.handleNameKeyDown);
+      this.closeNamePrompt();
     });
   }
 
@@ -225,15 +208,9 @@ export class MenuScene extends Phaser.Scene {
       })
       .setOrigin(0.5);
 
-    const inputBack = this.add.rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2 + 8, 330, 48, 0x0f172a, 1).setStrokeStyle(2, 0x7dd3fc, 0.75);
-    this.nameInputText = this.add
-      .text(GAME_WIDTH / 2, GAME_HEIGHT / 2 + 8, "", {
-        color: Palette.text,
-        fontFamily: "Arial, sans-serif",
-        fontSize: "24px",
-        fontStyle: "800"
-      })
-      .setOrigin(0.5);
+    const inputBack = this.add
+      .rectangle(GAME_WIDTH / 2, GAME_HEIGHT / 2 + 8, 330, 48, 0x0f172a, 1)
+      .setStrokeStyle(2, 0x7dd3fc, 0.75);
 
     const saveButton = createTextButton(this, {
       label: "Save",
@@ -253,25 +230,84 @@ export class MenuScene extends Phaser.Scene {
       onClick: () => this.closeNamePrompt()
     });
 
-    this.namePrompt = this.add.container(0, 0, [shade, panel, title, hint, inputBack, this.nameInputText, saveButton, backButton]);
+    this.namePrompt = this.add.container(0, 0, [shade, panel, title, hint, inputBack, saveButton, backButton]);
     this.namePrompt.setDepth(90);
-    this.updateNameInputText();
+    this.createNameInputElement();
 
-    this.input.keyboard?.on("keydown", this.handleNameKeyDown);
     sfxSystem.play("ui");
   }
 
-  private updateNameInputText(): void {
-    this.nameInputText?.setText(this.pendingPlayerName.trim() || "Type your name");
-    this.nameInputText?.setColor(this.pendingPlayerName.trim() ? Palette.text : Palette.mutedText);
+  private createNameInputElement(): void {
+    const input = document.createElement("input");
+
+    input.className = "player-name-input";
+    input.type = "text";
+    input.inputMode = "text";
+    input.autocomplete = "name";
+    input.autocapitalize = "words";
+    input.maxLength = 14;
+    input.placeholder = "Type your name";
+    input.value = this.pendingPlayerName;
+
+    input.addEventListener("input", this.handleNameInput);
+    input.addEventListener("keydown", this.handleNameInputKeyDown);
+    window.addEventListener("resize", this.handleViewportChanged);
+    window.addEventListener("orientationchange", this.handleViewportChanged);
+    document.body.appendChild(input);
+
+    this.nameInputElement = input;
+    this.positionNameInputElement();
+    input.focus({ preventScroll: true });
+  }
+
+  private positionNameInputElement(): void {
+    const input = this.nameInputElement;
+
+    if (!input) {
+      return;
+    }
+
+    const canvasBounds = this.game.canvas.getBoundingClientRect();
+    const scaleX = canvasBounds.width / GAME_WIDTH;
+    const scaleY = canvasBounds.height / GAME_HEIGHT;
+    const inputWidth = 330 * scaleX;
+    const inputHeight = 48 * scaleY;
+    const inputX = GAME_WIDTH / 2 - 165;
+    const inputY = GAME_HEIGHT / 2 + 8 - 24;
+
+    input.style.left = `${canvasBounds.left + inputX * scaleX}px`;
+    input.style.top = `${canvasBounds.top + inputY * scaleY}px`;
+    input.style.width = `${inputWidth}px`;
+    input.style.height = `${inputHeight}px`;
+    input.style.fontSize = `${Math.max(16, 24 * Math.min(scaleX, scaleY))}px`;
+  }
+
+  private updatePendingNameFromInput(): void {
+    const input = this.nameInputElement;
+
+    if (!input) {
+      return;
+    }
+
+    const cleanedValue = input.value.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, " ").slice(0, 14);
+
+    if (input.value !== cleanedValue) {
+      input.value = cleanedValue;
+    }
+
+    this.pendingPlayerName = cleanedValue;
   }
 
   private confirmPlayerName(): void {
+    this.updatePendingNameFromInput();
     const cleanName = this.sanitizePlayerName(this.pendingPlayerName);
 
     if (!cleanName) {
       this.pendingPlayerName = "Player";
-      this.updateNameInputText();
+      if (this.nameInputElement) {
+        this.nameInputElement.value = this.pendingPlayerName;
+        this.nameInputElement.focus({ preventScroll: true });
+      }
       return;
     }
 
@@ -282,11 +318,23 @@ export class MenuScene extends Phaser.Scene {
   }
 
   private closeNamePrompt(): void {
-    this.input.keyboard?.off("keydown", this.handleNameKeyDown);
+    this.destroyNameInputElement();
     this.namePrompt?.destroy(true);
     this.namePrompt = undefined;
-    this.nameInputText = undefined;
     this.pendingPlayerName = "";
+  }
+
+  private destroyNameInputElement(): void {
+    if (!this.nameInputElement) {
+      return;
+    }
+
+    this.nameInputElement.removeEventListener("input", this.handleNameInput);
+    this.nameInputElement.removeEventListener("keydown", this.handleNameInputKeyDown);
+    window.removeEventListener("resize", this.handleViewportChanged);
+    window.removeEventListener("orientationchange", this.handleViewportChanged);
+    this.nameInputElement.remove();
+    this.nameInputElement = undefined;
   }
 
   private sanitizePlayerName(playerName: string): string {

@@ -9,37 +9,24 @@ export class SettingsScene extends Phaser.Scene {
   private readonly skinCards: Phaser.GameObjects.Container[] = [];
   private pendingPlayerName = "";
   private selectedSkinId: TankSkinId = DEFAULT_TANK_SKIN_ID;
-  private nameInputFocused = false;
   private nameInputBack?: Phaser.GameObjects.Rectangle;
-  private nameCaret?: Phaser.GameObjects.Rectangle;
-  private nameInputText?: Phaser.GameObjects.Text;
+  private nameInputElement?: HTMLInputElement;
   private statusText?: Phaser.GameObjects.Text;
   private skinTitle?: Phaser.GameObjects.Text;
   private soundButton?: Phaser.GameObjects.Container;
-  private readonly handleNameKeyDown = (event: KeyboardEvent): void => {
-    if (!this.nameInputFocused) {
-      return;
-    }
-
+  private readonly handleNameInput = (): void => this.updatePendingNameFromInput();
+  private readonly handleNameInputKeyDown = (event: KeyboardEvent): void => {
     if (event.key === "Enter") {
       this.savePlayerName();
       event.preventDefault();
-      return;
     }
 
-    if (event.key === "Backspace") {
-      this.pendingPlayerName = this.pendingPlayerName.slice(0, -1);
-      this.updateNameInputText();
-      event.preventDefault();
-      return;
-    }
-
-    if (event.key.length === 1 && /^[a-zA-Z0-9 ]$/.test(event.key) && this.pendingPlayerName.length < 14) {
-      this.pendingPlayerName = `${this.pendingPlayerName}${event.key}`.replace(/\s+/g, " ");
-      this.updateNameInputText();
+    if (event.key === "Escape") {
+      this.nameInputElement?.blur();
       event.preventDefault();
     }
   };
+  private readonly handleViewportChanged = (): void => this.positionNameInputElement();
 
   constructor() {
     super(SceneKeys.Settings);
@@ -62,9 +49,8 @@ export class SettingsScene extends Phaser.Scene {
     this.drawSkinCards();
     this.drawFooterButtons();
 
-    this.input.keyboard?.on("keydown", this.handleNameKeyDown);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      this.input.keyboard?.off("keydown", this.handleNameKeyDown);
+      this.destroyNameInputElement();
     });
   }
 
@@ -134,24 +120,7 @@ export class SettingsScene extends Phaser.Scene {
 
     this.nameInputBack = this.add.rectangle(278, 194, 330, 44, 0x0f172a, 1).setStrokeStyle(2, 0x7dd3fc, 0.7);
     this.nameInputBack.setInteractive({ useHandCursor: true });
-    this.nameInputBack.on("pointerup", () => this.setNameInputFocused(true));
-
-    this.nameInputText = this.add
-      .text(278, 194, "", {
-        color: Palette.text,
-        fontFamily: "Arial, sans-serif",
-        fontSize: "22px",
-        fontStyle: "800"
-      })
-      .setOrigin(0.5);
-    this.nameCaret = this.add.rectangle(286, 194, 3, 26, 0xfef3c7, 1).setOrigin(0, 0.5).setVisible(false);
-    this.tweens.add({
-      targets: this.nameCaret,
-      alpha: { from: 1, to: 0.18 },
-      duration: 460,
-      yoyo: true,
-      repeat: -1
-    });
+    this.nameInputBack.on("pointerup", () => this.nameInputElement?.focus({ preventScroll: true }));
 
     createTextButton(this, {
       label: "Save Name",
@@ -171,7 +140,7 @@ export class SettingsScene extends Phaser.Scene {
       })
       .setOrigin(0, 0.5);
 
-    this.updateNameInputText();
+    this.createNameInputElement();
   }
 
   private drawSoundToggle(): void {
@@ -183,7 +152,7 @@ export class SettingsScene extends Phaser.Scene {
       width: 166,
       height: 40,
       onClick: () => {
-        this.setNameInputFocused(false);
+        this.nameInputElement?.blur();
         sfxSystem.toggleMuted();
         this.drawSoundToggle();
       }
@@ -248,7 +217,7 @@ export class SettingsScene extends Phaser.Scene {
     const card = this.add.container(x, y, [background, tank, label, marker, hitArea]);
 
     hitArea.on("pointerup", () => {
-      this.setNameInputFocused(false);
+      this.nameInputElement?.blur();
       this.selectedSkinId = skin.id;
       saveSystem.updateTankSkin(skin.id);
       sfxSystem.play("switch");
@@ -289,32 +258,74 @@ export class SettingsScene extends Phaser.Scene {
     });
   }
 
-  private updateNameInputText(): void {
-    const name = this.pendingPlayerName.trim();
-    this.nameInputText?.setText(name || "Player");
-    this.nameInputText?.setColor(name ? Palette.text : Palette.mutedText);
-    this.updateNameCaretPosition();
+  private createNameInputElement(): void {
+    const input = document.createElement("input");
+
+    input.className = "player-name-input";
+    input.type = "text";
+    input.inputMode = "text";
+    input.autocomplete = "name";
+    input.autocapitalize = "words";
+    input.maxLength = 14;
+    input.placeholder = "Type your name";
+    input.value = this.pendingPlayerName.trim() || "Player";
+
+    input.addEventListener("input", this.handleNameInput);
+    input.addEventListener("keydown", this.handleNameInputKeyDown);
+    window.addEventListener("resize", this.handleViewportChanged);
+    window.addEventListener("orientationchange", this.handleViewportChanged);
+    document.body.appendChild(input);
+
+    this.nameInputElement = input;
+    this.positionNameInputElement();
   }
 
-  private setNameInputFocused(focused: boolean): void {
-    this.nameInputFocused = focused;
-    this.nameInputBack?.setStrokeStyle(focused ? 3 : 2, focused ? 0xfef3c7 : 0x7dd3fc, focused ? 1 : 0.7);
-    this.nameCaret?.setVisible(focused).setAlpha(1);
-    this.updateNameCaretPosition();
-  }
+  private positionNameInputElement(): void {
+    const input = this.nameInputElement;
 
-  private updateNameCaretPosition(): void {
-    if (!this.nameInputText || !this.nameCaret) {
+    if (!input) {
       return;
     }
 
-    const inputLeft = 278 - 330 / 2 + 18;
-    const inputRight = 278 + 330 / 2 - 18;
-    const textRight = this.nameInputText.x + this.nameInputText.displayWidth / 2 + 6;
-    this.nameCaret.setPosition(Phaser.Math.Clamp(textRight, inputLeft, inputRight), 194);
+    const canvasBounds = this.game.canvas.getBoundingClientRect();
+    const scaleX = canvasBounds.width / GAME_WIDTH;
+    const scaleY = canvasBounds.height / GAME_HEIGHT;
+    const inputWidth = 330 * scaleX;
+    const inputHeight = 44 * scaleY;
+    const inputX = 278 - 330 / 2;
+    const inputY = 194 - 44 / 2;
+
+    input.style.left = `${canvasBounds.left + inputX * scaleX}px`;
+    input.style.top = `${canvasBounds.top + inputY * scaleY}px`;
+    input.style.width = `${inputWidth}px`;
+    input.style.height = `${inputHeight}px`;
+    input.style.fontSize = `${Math.max(16, 22 * Math.min(scaleX, scaleY))}px`;
+  }
+
+  private updatePendingNameFromInput(): void {
+    const input = this.nameInputElement;
+
+    if (!input) {
+      return;
+    }
+
+    const cleanedValue = input.value.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, " ").slice(0, 14);
+
+    if (input.value !== cleanedValue) {
+      input.value = cleanedValue;
+    }
+
+    this.pendingPlayerName = cleanedValue;
+  }
+
+  private updateNameInputText(): void {
+    if (this.nameInputElement) {
+      this.nameInputElement.value = this.pendingPlayerName.trim() || "Player";
+    }
   }
 
   private savePlayerName(): void {
+    this.updatePendingNameFromInput();
     const cleanName = this.sanitizePlayerName(this.pendingPlayerName) || "Player";
     this.pendingPlayerName = cleanName;
     saveSystem.updatePlayerName(cleanName);
@@ -332,5 +343,18 @@ export class SettingsScene extends Phaser.Scene {
 
   private sanitizePlayerName(playerName: string): string {
     return playerName.replace(/[^a-zA-Z0-9 ]/g, "").replace(/\s+/g, " ").trim().slice(0, 14);
+  }
+
+  private destroyNameInputElement(): void {
+    if (!this.nameInputElement) {
+      return;
+    }
+
+    this.nameInputElement.removeEventListener("input", this.handleNameInput);
+    this.nameInputElement.removeEventListener("keydown", this.handleNameInputKeyDown);
+    window.removeEventListener("resize", this.handleViewportChanged);
+    window.removeEventListener("orientationchange", this.handleViewportChanged);
+    this.nameInputElement.remove();
+    this.nameInputElement = undefined;
   }
 }
